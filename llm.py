@@ -5,6 +5,7 @@ import numpy as np
 from datetime import datetime
 import plotly.graph_objects as go
 import torch
+import time
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 
 # ----------------------------
@@ -33,21 +34,42 @@ def load_llm():
 
 llm = load_llm()
 
-def llm_commentary(signal_context: str):
-    """Generate commentary from local LLM (Phi-3 Mini)."""
-    prompt = f"""
-    You are a financial analyst. Based on these technical signals and option details,
-    explain the potential risks and rewards in plain English.
-
-    {signal_context}
+def llm_commentary(ticker: str, latest):
+    """Generate structured commentary for the *latest* signal of a ticker."""
+    system_prompt = f"""
+    You are an expert options analyst.
+    Analyze the most recent signals for {ticker} and provide a structured report with exactly:
+    1. Upside Potential
+    2. Risks / Downside
+    3. Suggested Action
+    End your answer after Suggested Action.
     """
-    try:
-        result = llm(prompt, max_new_tokens=250, do_sample=True, temperature=0.7)
-        if not result or "generated_text" not in result[0]:
-            return "⚠️ No commentary generated."
-        return result[0]["generated_text"]
-    except Exception as e:
-        return f"⚠️ LLM generation failed: {e}"
+
+    signal_context = f"""
+    Ticker: {ticker}
+    Close: {latest['Close']:.2f}
+    SMA10: {latest['SMA10']:.2f}
+    RSI: {latest['RSI']:.2f}
+    MACD Histogram: {latest['MACDhist']:.2f}
+    """
+
+    full_prompt = f"{system_prompt}\n\nSignals:\n{signal_context}"
+
+    with st.spinner(f"🧠 Analyzing {ticker}..."):
+        result = llm(full_prompt, max_new_tokens=1200, do_sample=True, temperature=0.7)
+        if result and "generated_text" in result[0]:
+            commentary_text = result[0]["generated_text"].strip()
+        else:
+            commentary_text = "⚠️ No commentary generated."
+
+    # Progress bar
+    progress = st.progress(0)
+    for percent in range(100):
+        time.sleep(0.003)
+        progress.progress(percent + 1)
+
+    return commentary_text
+
 
 # ----------------------------
 # SIGNAL GENERATOR
@@ -84,7 +106,7 @@ def signal_filter(df):
 # STREAMLIT APP
 # ----------------------------
 st.set_page_config(page_title="Options Signal Dashboard", layout="wide")
-st.title("📈 Options Signal Dashboard with Local LLM Commentary (Phi-3 Mini)")
+st.title("📈 Options Signal Dashboard with LLM Commentary (Phi-3 Mini)")
 
 # Sidebar diagnostics
 st.sidebar.header("🔧 Diagnostics")
@@ -191,7 +213,9 @@ for ticker in TICKERS:
                     else:
                         st.error(f"❌ Skip: Sleeve too small (need ${contract_cost:.2f}).")
 
-                    # LLM Commentary
+                    # ----------------------------
+                    # LLM Commentary with Spinner + Progress Bar
+                    # ----------------------------
                     signal_context = f"""
                     Ticker: {ticker}
                     Close: {latest['Close']:.2f}
@@ -201,8 +225,8 @@ for ticker in TICKERS:
                     Suggested Contract: {expiry} {strike}C at {option_price:.2f}
                     """
                     with st.expander("📊 LLM Commentary (Phi-3 Mini)"):
-                        commentary = llm_commentary(signal_context)
-                        st.write(commentary)
+                        commentary_text = llm_commentary(ticker, signal_context)
+                        st.text_area("Full Commentary", commentary_text, height=300)
 
                 else:
                     st.warning("No valid expiries available.")
