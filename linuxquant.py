@@ -5,7 +5,6 @@ import numpy as np
 from datetime import datetime
 import plotly.graph_objects as go
 import torch
-import time
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 
 # ----------------------------
@@ -27,22 +26,63 @@ def load_llm():
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        device_map="auto",   # prefer Apple Silicon GPU (MPS)
-        dtype="auto"
+        device_map="auto",      # CUDA for 4070 Ti Super
+        torch_dtype=torch.bfloat16
     )
     return pipeline("text-generation", model=model, tokenizer=tokenizer, return_full_text=False)
 
 llm = load_llm()
 
-def llm_commentary(ticker: str, latest):
-    """Generate structured commentary for the *latest* signal of a ticker."""
+# ----------------------------
+# CONFIDENCE SCORING
+# ----------------------------
+def compute_confidence(latest):
+    """Compute a 0–100 confidence score from signals."""
+    score = 50  # base neutral
+
+    # RSI sweet spot
+    if 55 <= latest["RSI"] <= 70:
+        score += 20
+    elif latest["RSI"] > 70:
+        score -= 10
+    elif latest["RSI"] < 40:
+        score -= 20
+
+    # Price above SMA10
+    if latest["Close"] > latest["SMA10"]:
+        score += 15
+    else:
+        score -= 10
+
+    # MACD histogram positive
+    if latest["MACDhist"] > 0:
+        score += 15
+    else:
+        score -= 10
+
+    return max(0, min(100, score))
+
+# ----------------------------
+# LLM COMMENTARY
+# ----------------------------
+def llm_commentary(ticker: str, latest, confidence: int):
+    """Generate structured Markdown commentary for the most recent signal of a ticker."""
     system_prompt = f"""
-    You are an expert options analyst.
-    Analyze the most recent signals for {ticker} and provide a structured report with exactly:
-    1. Upside Potential
-    2. Risks / Downside
-    3. Suggested Action
-    End your answer after Suggested Action.
+    You are a senior options analyst.
+    Write a professional Markdown report analyzing the most recent signal for {ticker}.
+    Use exactly these sections:
+
+    ## Upside Potential
+    - Explain bullish factors
+
+    ## Risks / Downside
+    - Explain bearish factors
+
+    ## Suggested Action
+    - Recommend option strategy (buy, hold, skip) with reasoning
+
+    End the report after Suggested Action.
+    Keep it concise, professional, and easy to understand.
     """
 
     signal_context = f"""
@@ -51,19 +91,14 @@ def llm_commentary(ticker: str, latest):
     SMA10: {latest['SMA10']:.2f}
     RSI: {latest['RSI']:.2f}
     MACD Histogram: {latest['MACDhist']:.2f}
+    Confidence Score: {confidence}/100
     """
 
-    full_prompt = f"{system_prompt}\n\nSignals:\n{signal_context}"
+    full_prompt = f"{system_prompt}\n\nSignal Data:\n{signal_context}"
 
     with st.spinner(f"🧠 Analyzing {ticker}..."):
-        result = llm(full_prompt, max_new_tokens=1200, do_sample=True, temperature=0.7)
+        result = llm(full_prompt, max_new_tokens=800, do_sample=True, temperature=0.7)
         commentary_text = result[0]["generated_text"].strip() if result else "⚠️ No commentary generated."
-
-    # Progress bar
-    progress = st.progress(0)
-    for percent in range(100):
-        time.sleep(0.003)
-        progress.progress(percent + 1)
 
     return commentary_text
 
@@ -102,17 +137,17 @@ def signal_filter(df):
 # STREAMLIT APP
 # ----------------------------
 st.set_page_config(page_title="Options Signal Dashboard", layout="wide")
-st.title("📈 Options Signal Dashboard with LLM Commentary (Phi-3 Mini)")
+st.title("📈 Options Signal Dashboard with LLM Commentary + Confidence Score")
 
 # Sidebar diagnostics
 st.sidebar.header("🔧 Diagnostics")
 st.sidebar.write(f"PyTorch version: {torch.__version__}")
 st.sidebar.write(f"Transformers version: {__import__('transformers').__version__}")
-st.sidebar.write(f"MPS available: {torch.backends.mps.is_available()}")
-st.sidebar.write(f"MPS built: {torch.backends.mps.is_built()}")
-
-device_status = "✅ Running on Apple Silicon GPU (MPS)" if torch.backends.mps.is_available() else "⚠️ Falling back to CPU"
-st.sidebar.success(device_status if "✅" in device_status else device_status)
+if torch.cuda.is_available():
+    st.sidebar.write(f"CUDA: {torch.version.cuda}")
+    st.sidebar.write(f"GPU: {torch.cuda.get_device_name(0)}")
+else:
+    st.sidebar.warning("⚠️ CUDA not available, fallback to CPU/MPS.")
 
 # Capital section
 st.sidebar.header("Capital")
@@ -166,64 +201,66 @@ for ticker in TICKERS:
         if latest["Signal"]:
             st.success(f"🚨 Trade Signal Triggered at {latest['Close']:.2f}")
 
+            confidence = compute_confidence(latest)
+            st.metric("AI Confidence Score", f"{confidence}/100")
+
             try:
+                # Option chain fetch
                 tkr = yf.Ticker(ticker)
                 expiries = tkr.options
                 today = datetime.today().date()
 
-                if not expiries:
-                    st.warning(f"No option expiries available for {ticker}.")
-                    continue
-
                 valid_expiries = [
                     e for e in expiries
-                    if datetime.strptime(e, "%Y-%m-%d").date() >= today
+                    if datetime.strptime(e, "%Y-%m-%d").date() > today
                 ]
-
                 if not valid_expiries:
-                    st.info(f"Market closed. Using latest available expiry for {ticker}.")
-                    expiry = expiries[-1]
+                    st.warning(f"No future expiries available for {ticker}.")
                 else:
+                    # Pick expiry nearest TARGET_DTE
                     expiry_dates = [datetime.strptime(e, "%Y-%m-%d").date() for e in valid_expiries]
                     best_expiry = min(expiry_dates, key=lambda d: abs((d - today).days - TARGET_DTE))
                     expiry = best_expiry.strftime("%Y-%m-%d")
 
-                chain = tkr.option_chain(expiry)
-                if chain is None or chain.calls.empty:
-                    st.warning(f"No calls available for {ticker} at expiry {expiry}.")
-                    continue
+                    # Pull option chain
+                    chain = tkr.option_chain(expiry)
+                    calls = chain.calls
+                    spot = latest["Close"]
 
-                calls = chain.calls
-                spot = latest["Close"]
-                target_strike = spot * 1.05
-                calls["dist"] = (calls["strike"] - target_strike).abs()
-                selected_call = calls.sort_values("dist").iloc[0]
+                    # Pick 5% OTM call
+                    target_strike = spot * 1.05
+                    calls["dist"] = (calls["strike"] - target_strike).abs()
+                    selected_call = calls.sort_values("dist").iloc[0]
 
-                option_price = float(selected_call["lastPrice"])
-                strike = float(selected_call["strike"])
+                    strike = float(selected_call["strike"])
+                    option_price = float(selected_call["lastPrice"])
+                    volume = int(selected_call.get("volume", 0))
+                    oi = int(selected_call.get("openInterest", 0))
 
-                st.info(f"📊 Suggested Contract: {ticker} {expiry} {strike}C @ ${option_price:.2f}")
+                    st.info(f"📊 Suggested Contract: {ticker} {expiry} {strike}C @ ${option_price:.2f}")
+                    st.write(f"**Volume:** {volume} | **Open Interest:** {oi}")
 
-                risk_amount = min(st.session_state.sleeve * RISK_PCT, MAX_RISK, LOSS_CAP)
-                contract_cost = option_price * 100
-                if st.session_state.sleeve >= contract_cost:
-                    qty = max(1, int(risk_amount / contract_cost))
-                    trade_cost = contract_cost * qty
-                    st.markdown(f"✅ Advice: Buy {qty} contract(s). Exit at +200–300%, cut if SMA10 breaks.")
-                    if trade_cost > risk_amount:
-                        st.warning(f"⚠️ Trade cost ${trade_cost:.2f} > allowed risk ${risk_amount:.2f}")
-                else:
-                    st.error(f"❌ Skip: Sleeve too small (need ${contract_cost:.2f}).")
-
-                # ----------------------------
-                # LLM Commentary
-                # ----------------------------
-                with st.expander("📊 LLM Commentary (Phi-3 Mini)"):
-                    commentary_text = llm_commentary(ticker, latest)
-                    st.text_area("Full Commentary", commentary_text, height=300)
+                    # Risk allocation
+                    risk_amount = min(st.session_state.sleeve * RISK_PCT, MAX_RISK, LOSS_CAP)
+                    contract_cost = option_price * 100
+                    if st.session_state.sleeve >= contract_cost:
+                        qty = max(1, int(risk_amount / contract_cost))
+                        trade_cost = contract_cost * qty
+                        st.success(f"✅ You can buy {qty} contract(s) for ~${trade_cost:,.2f}")
+                    else:
+                        st.error(f"❌ Sleeve too small (need ${contract_cost:.2f} for 1 contract).")
 
             except Exception as e:
-                st.error(f"Option chain fetch failed for {ticker}: {e}")
-                continue
+                st.error(f"⚠️ Option chain fetch failed for {ticker}: {e}")
+
+            # LLM commentary
+            commentary_text = llm_commentary(ticker, latest, confidence)
+            with st.expander("📊 LLM Commentary (Phi-3 Mini)"):
+                st.markdown(commentary_text, unsafe_allow_html=True)
+                st.download_button(
+                    label="💾 Download Full Report",
+                    data=commentary_text,
+                    file_name=f"{ticker}_analysis.md"
+                )
         else:
             st.info("No signal today.")
