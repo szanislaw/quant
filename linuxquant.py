@@ -15,7 +15,7 @@ RISK_PCT = 0.20
 MAX_RISK = 5000
 LOSS_CAP = 3000
 TARGET_DTE = 10
-TICKERS = ["NVDA", "TSLA", "AMD", "META", "GOOGL"]
+TICKERS = ["NVDA", "TSLA", "AMD", "META", "GOOGL", "AMZN"]
 
 # ----------------------------
 # LOAD LOCAL LLM (Phi-3 Mini)
