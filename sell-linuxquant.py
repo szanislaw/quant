@@ -40,7 +40,6 @@ def compute_confidence(latest):
     """Compute a 0–100 confidence score from signals."""
     score = 50  # base neutral
 
-    # RSI sweet spot
     if 55 <= latest["RSI"] <= 70:
         score += 20
     elif latest["RSI"] > 70:
@@ -48,13 +47,11 @@ def compute_confidence(latest):
     elif latest["RSI"] < 40:
         score -= 20
 
-    # Price above SMA10
     if latest["Close"] > latest["SMA10"]:
         score += 15
     else:
         score -= 10
 
-    # MACD histogram positive
     if latest["MACDhist"] > 0:
         score += 15
     else:
@@ -63,44 +60,61 @@ def compute_confidence(latest):
     return max(0, min(100, score))
 
 # ----------------------------
+# QUANT EXIT LOGIC
+# ----------------------------
+def quant_exit_logic(entry_price, option_price, expiry_date, latest):
+    today = datetime.today().date()
+    dte = (expiry_date - today).days
+    profit_mult = option_price / entry_price if entry_price > 0 else 1.0
+
+    reasons = []
+    decision = "HOLD"
+
+    if profit_mult >= 2.5:
+        decision = "SELL"
+        reasons.append("Profit target reached (≥ 2.5x).")
+    elif latest["Close"] < latest["SMA10"]:
+        decision = "SELL"
+        reasons.append("Close fell below SMA10 support.")
+    elif dte <= 5:
+        decision = "SELL"
+        reasons.append("Contract too close to expiry (≤ 5 DTE).")
+
+    if not reasons:
+        reasons.append("No exit triggers hit; maintain position.")
+
+    return decision, reasons, dte, profit_mult
+
+# ----------------------------
 # LLM COMMENTARY
 # ----------------------------
-def llm_commentary(ticker: str, latest, confidence: int):
-    """Generate structured Markdown commentary for the most recent signal of a ticker."""
+def llm_commentary(ticker, latest, confidence, decision, reasons, dte, profit_mult):
     system_prompt = f"""
     You are a senior options analyst.
-    Write a professional Markdown report analyzing the most recent signal for {ticker}.
-    Use exactly these sections:
 
-    ## Upside Potential
-    - Explain bullish factors
+    Quant rules gave the decision: {decision}.
+    Reasons: {', '.join(reasons)}.
+    Current profit multiple: {profit_mult:.2f}x.
+    Days to expiry: {dte}.
 
-    ## Risks / Downside
-    - Explain bearish factors
+    IMPORTANT:
+    - Only use the values explicitly provided in the 'Signal Data' section below.
+    - Do not mention or invent other indicators (e.g., SMA50, SMA200, Bollinger, ATR, IV, Stochastic).
+    - Keep your analysis grounded in the given data only.
 
-    ## Suggested Action
-    - Recommend option strategy (buy, hold, skip) with reasoning
-
-    End the report after Suggested Action.
-    Keep it concise, professional, and easy to understand.
-    """
-
-    signal_context = f"""
-    Ticker: {ticker}
-    Close: {latest['Close']:.2f}
-    SMA10: {latest['SMA10']:.2f}
-    RSI: {latest['RSI']:.2f}
-    MACD Histogram: {latest['MACDhist']:.2f}
-    Confidence Score: {confidence}/100
+    Your job:
+    1. Restate the quant decision clearly.
+    2. Provide Upside Potential (bullish factors).
+    3. Provide Risks / Downside (bearish factors).
+    4. In Suggested Action, state the quant decision and reasoning.
+    5. Add '⚠️ Advisory Override' if you see an alternative, otherwise say 'No advisory override.'
     """
 
     full_prompt = f"{system_prompt}\n\nSignal Data:\n{signal_context}"
 
     with st.spinner(f"🧠 Analyzing {ticker}..."):
-        result = llm(full_prompt, max_new_tokens=800, do_sample=True, temperature=0.7)
-        commentary_text = result[0]["generated_text"].strip() if result else "⚠️ No commentary generated."
-
-    return commentary_text
+        result = llm(full_prompt, max_new_tokens=600, temperature=0.5)
+        return result[0]["generated_text"].strip() if result else "⚠️ No commentary generated."
 
 # ----------------------------
 # SIGNAL GENERATOR
@@ -137,7 +151,7 @@ def signal_filter(df):
 # STREAMLIT APP
 # ----------------------------
 st.set_page_config(page_title="Options Signal Dashboard", layout="wide")
-st.title("📈 Options Signal Dashboard with LLM Commentary + Confidence Score")
+st.title("📈 Options Signal Dashboard with Quant + LLM Commentary")
 
 # Sidebar diagnostics
 st.sidebar.header("🔧 Diagnostics")
@@ -168,11 +182,12 @@ with st.expander("📘 Risk Management Rules & Explanation"):
     - Capped at ${MAX_RISK:,} (absolute)  
     - Additional loss cap at ${LOSS_CAP:,}  
 
-    **Exit Strategy:**  
+    **Exit Strategy (Quant Authority):**  
     - 🎯 Take profits at +200–300%  
     - ❌ Cut if price closes below SMA10  
+    - ⏳ Never hold within 5 days of expiry  
 
-    This keeps drawdowns controlled while preserving upside.
+    The LLM may suggest overrides, but these rules are final.
     """)
 
 # ----------------------------
@@ -205,7 +220,6 @@ for ticker in TICKERS:
             st.metric("AI Confidence Score", f"{confidence}/100")
 
             try:
-                # Option chain fetch
                 tkr = yf.Ticker(ticker)
                 expiries = tkr.options
                 today = datetime.today().date()
@@ -217,17 +231,14 @@ for ticker in TICKERS:
                 if not valid_expiries:
                     st.warning(f"No future expiries available for {ticker}.")
                 else:
-                    # Pick expiry nearest TARGET_DTE
                     expiry_dates = [datetime.strptime(e, "%Y-%m-%d").date() for e in valid_expiries]
                     best_expiry = min(expiry_dates, key=lambda d: abs((d - today).days - TARGET_DTE))
                     expiry = best_expiry.strftime("%Y-%m-%d")
 
-                    # Pull option chain
                     chain = tkr.option_chain(expiry)
                     calls = chain.calls
                     spot = latest["Close"]
 
-                    # Pick 5% OTM call
                     target_strike = spot * 1.05
                     calls["dist"] = (calls["strike"] - target_strike).abs()
                     selected_call = calls.sort_values("dist").iloc[0]
@@ -247,20 +258,25 @@ for ticker in TICKERS:
                         qty = max(1, int(risk_amount / contract_cost))
                         trade_cost = contract_cost * qty
                         st.success(f"✅ You can buy {qty} contract(s) for ~${trade_cost:,.2f}")
+
+                        # Apply quant exit rules
+                        decision, reasons, dte, profit_mult = quant_exit_logic(option_price, option_price, best_expiry, latest)
+
+                        # LLM commentary
+                        commentary_text = llm_commentary(ticker, latest, confidence, decision, reasons, dte, profit_mult)
+                        st.markdown("### 📊 LLM Commentary (with Advisory Override)")
+                        st.markdown(commentary_text, unsafe_allow_html=True)
+                        st.download_button(
+                            label="💾 Download Full Report",
+                            data=commentary_text,
+                            file_name=f"{ticker}_analysis.md"
+                        )
+
                     else:
                         st.error(f"❌ Sleeve too small (need ${contract_cost:.2f} for 1 contract).")
 
             except Exception as e:
                 st.error(f"⚠️ Option chain fetch failed for {ticker}: {e}")
 
-            # LLM commentary
-            commentary_text = llm_commentary(ticker, latest, confidence)
-            with st.expander("📊 LLM Commentary (Phi-3 Mini)"):
-                st.markdown(commentary_text, unsafe_allow_html=True)
-                st.download_button(
-                    label="💾 Download Full Report",
-                    data=commentary_text,
-                    file_name=f"{ticker}_analysis.md"
-                )
         else:
             st.info("No signal today.")
