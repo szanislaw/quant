@@ -15,7 +15,7 @@ RISK_PCT = 0.20
 MAX_RISK = 5000
 LOSS_CAP = 3000
 TARGET_DTE = 10
-TICKERS = ["NVDA", "TSLA", "AMD", "META", "GOOGL", "AMZN", "PLTR", "AAPL", "MSFT", "INTC", "QCOM", "IBM", "ORCL", "CSCO", "ADBE", "CRM"]
+TICKERS = ["NVDA", "TSLA", "AMD", "META", "GOOGL", "AMZN", "PLTR", "AAPL", "MSFT", "INTC", "QCOM", "IBM", "ORCL", "NBIS", "CRWV"]
 
 # ----------------------------
 # LOAD LOCAL LLM (Phi-3 Mini)
@@ -89,7 +89,6 @@ def quant_exit_logic(entry_price, option_price, expiry_date, latest):
 # LLM COMMENTARY
 # ----------------------------
 def llm_commentary(ticker, latest, confidence, decision, reasons, dte, profit_mult):
-    # Construct signal_context dynamically
     signal_context = f"""
     Ticker: {ticker}
     Close: {latest['Close']:.2f}
@@ -109,8 +108,8 @@ def llm_commentary(ticker, latest, confidence, decision, reasons, dte, profit_mu
 
     IMPORTANT:
     - Only use the values explicitly provided in the 'Signal Data' section below.
-    - Do not mention or invent other indicators (e.g., SMA50, SMA200, Bollinger, ATR, IV, Stochastic).
-    - Keep your analysis grounded in the given data only.
+    - Do not invent other indicators (SMA50, SMA200, Bollinger, ATR, IV, Stochastic).
+    - Keep analysis grounded in the given data only.
 
     Your job:
     1. Restate the quant decision clearly.
@@ -120,11 +119,25 @@ def llm_commentary(ticker, latest, confidence, decision, reasons, dte, profit_mu
     5. Add '⚠️ Advisory Override' if you see an alternative, otherwise say 'No advisory override.'
     """
 
-    full_prompt = f"{system_prompt}\n\nSignal Data:\n{signal_context}"
+    # Format in Phi-3 chat style
+    full_prompt = f"<|user|>\n{system_prompt}\n\nSignal Data:\n{signal_context}\n<|assistant|>\n"
 
     with st.spinner(f"🧠 Analyzing {ticker}..."):
-        result = llm(full_prompt, max_new_tokens=600, temperature=0.5)
-        return result[0]["generated_text"].strip() if result else "⚠️ No commentary generated."
+        outputs = llm(
+            full_prompt,
+            max_new_tokens=400,
+            temperature=0.7,
+            do_sample=True,
+            top_p=0.95,
+        )
+        text = outputs[0].get("generated_text", "").strip()
+
+        # If return_full_text=True, trim off the prompt
+        if text.startswith(full_prompt):
+            text = text[len(full_prompt):].strip()
+
+        return text if text else "⚠️ No commentary generated."
+
 
 # ----------------------------
 # SIGNAL GENERATOR
