@@ -15,32 +15,32 @@ import os
 # ----------------------------
 st.set_page_config(page_title="Options Signal Dashboard", layout="wide")
 
-# ----------------------------
-# SIMPLE PASSWORD PROTECTION
-# ----------------------------
-PASSWORD = os.getenv("STREAMLIT_PASSWORD", "celshawn00")  # set via env var in production
+# # ----------------------------
+# # SIMPLE PASSWORD PROTECTION
+# # ----------------------------
+# PASSWORD = os.getenv("STREAMLIT_PASSWORD", "celshawn00")  # set via env var in production
 
-def check_password():
-    """Password check before running the app."""
-    def password_entered():
-        if st.session_state["password"] == PASSWORD:
-            st.session_state["password_correct"] = True
-            del st.session_state["password"]  # clean up
-        else:
-            st.session_state["password_correct"] = False
+# def check_password():
+#     """Password check before running the app."""
+#     def password_entered():
+#         if st.session_state["password"] == PASSWORD:
+#             st.session_state["password_correct"] = True
+#             del st.session_state["password"]  # clean up
+#         else:
+#             st.session_state["password_correct"] = False
 
-    if "password_correct" not in st.session_state:
-        st.text_input("🔒 Enter password", type="password", on_change=password_entered, key="password")
-        return False
-    elif not st.session_state["password_correct"]:
-        st.text_input("🔒 Enter password", type="password", on_change=password_entered, key="password")
-        st.error("❌ Wrong password")
-        return False
-    else:
-        return True
+#     if "password_correct" not in st.session_state:
+#         st.text_input("🔒 Enter password", type="password", on_change=password_entered, key="password")
+#         return False
+#     elif not st.session_state["password_correct"]:
+#         st.text_input("🔒 Enter password", type="password", on_change=password_entered, key="password")
+#         st.error("❌ Wrong password")
+#         return False
+#     else:
+#         return True
 
-if not check_password():
-    st.stop()
+# if not check_password():
+#     st.stop()
 
 # ----------------------------
 # Optional: install if missing
@@ -60,7 +60,7 @@ RISK_PCT = 0.20
 MAX_RISK = 5000
 LOSS_CAP = 3000
 TARGET_DTE = 10
-REFRESH_INTERVAL = 5 * 60 * 1000  # 5 minutes in ms
+REFRESH_INTERVAL = 15 * 60 * 1000  # 15 minutes in ms
 TICKERS = ["NVDA", "TSLA", "AMD", "META", "GOOGL", "AMZN", "PLTR", "AAPL", "MSFT", "INTC", "QCOM", "IBM", "ORCL", "NBIS", "CRWV"]
 
 # ----------------------------
@@ -90,7 +90,7 @@ def compute_confidence(latest):
         score -= 10
     elif latest["RSI"] < 40:
         score -= 20
-    if latest["Close"] > latest["SMA10"]:
+    if latest["Close"] > latest["SMA50"]:
         score += 15
     else:
         score -= 10
@@ -110,8 +110,8 @@ def quant_exit_logic(entry_price, option_price, expiry_date, latest):
     reasons, decision = [], "HOLD"
     if profit_mult >= 2.5:
         decision = "SELL"; reasons.append("Profit target reached (≥ 2.5x).")
-    elif latest["Close"] < latest["SMA10"]:
-        decision = "SELL"; reasons.append("Close fell below SMA10 support.")
+    elif latest["Close"] < latest["SMA50"]:
+        decision = "SELL"; reasons.append("Close fell below SMA50 support.")
     elif dte <= 5:
         decision = "SELL"; reasons.append("Contract too close to expiry (≤ 5 DTE).")
     if not reasons:
@@ -135,7 +135,7 @@ def llm_commentary(ticker, latest, confidence, decision, reasons, dte, profit_mu
     signal_context = f"""
     Ticker: {ticker}
     Close: {latest['Close']:.2f}
-    SMA10: {latest['SMA10']:.2f}
+    SMA50: {latest['SMA50']:.2f}
     RSI: {latest['RSI']:.2f}
     MACD Histogram: {latest['MACDhist']:.2f}
     Confidence Score: {confidence}/100
@@ -174,63 +174,34 @@ def llm_commentary(ticker, latest, confidence, decision, reasons, dte, profit_mu
     return clean_llm_output(text), ("⚠️" if "discrepancy" in text.lower() else "✅")
 
 # ----------------------------
-# SIGNAL GENERATOR
+# SIGNAL GENERATOR (1H bars)
 # ----------------------------
 def signal_filter(df):
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = [c[0] for c in df.columns]
-
-    # SMA & breakout
-    df["SMA10"] = df["Close"].rolling(10).mean()
-    df["High20"] = df["High"].rolling(20).max().shift(1)
-
-    # RSI
+    df["SMA50"] = df["Close"].rolling(50).mean()   # 50 hours ≈ 2 days
+    df["High120"] = df["High"].rolling(120).max().shift(1)  # ≈ 1 month
     delta = df["Close"].diff()
     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     rs = gain / loss.replace(0, np.nan)
     df["RSI"] = 100 - (100 / (1 + rs))
-
-    # MACD
     ema12 = df["Close"].ewm(span=12).mean()
     ema26 = df["Close"].ewm(span=26).mean()
     df["MACD"] = ema12 - ema26
     df["MACDsig"] = df["MACD"].ewm(span=9).mean()
     df["MACDhist"] = df["MACD"] - df["MACDsig"]
-
-    # ATR for volatility-adjusted momentum
-    df["H-L"] = df["High"] - df["Low"]
-    df["H-PC"] = (df["High"] - df["Close"].shift(1)).abs()
-    df["L-PC"] = (df["Low"] - df["Close"].shift(1)).abs()
-    df["TR"] = df[["H-L", "H-PC", "L-PC"]].max(axis=1)
-    df["ATR14"] = df["TR"].rolling(14).mean()
-
-    df["SMA20"] = df["Close"].rolling(20).mean()
-    df["VAMS"] = (df["Close"] - df["SMA20"]) / df["ATR14"]
-
-    # Existing signal components
-    breakout = (df["Close"] > df["SMA10"]) | (df["Close"] > df["High20"])
+    df = df.dropna(subset=["SMA50", "High120", "RSI", "MACDhist"])
+    breakout = (df["Close"] > df["SMA50"]) | (df["Close"] > df["High120"])
     momentum = (df["Close"].pct_change() > 0.015) & (df["RSI"] > 50)
     macd_flip = df["MACDhist"] > 0
-
-    # New quant rule: volatility-adjusted momentum
-    vams_signal = df["VAMS"] > 2  # bullish threshold
-
-    # Combine signals (must meet at least 2 conditions incl. VAMS)
-    df.loc[:, "Signal"] = (
-        breakout.astype(int) +
-        momentum.astype(int) +
-        macd_flip.astype(int) +
-        vams_signal.astype(int)
-    ) >= 2
-
+    df.loc[:, "Signal"] = (breakout.astype(int) + momentum.astype(int) + macd_flip.astype(int)) >= 2
     return df
-
 
 # ----------------------------
 # APP BODY
 # ----------------------------
-st.title("📈 Options Signal Dashboard with Quant + LLM Commentary")
+st.title("📈 Options Signal Dashboard (1H timeframe) with Quant + LLM Commentary")
 
 # Auto-refresh
 if AUTORF_AVAILABLE:
@@ -267,51 +238,61 @@ st.sidebar.metric("Total Trades", len(st.session_state.trades))
 # MAIN LOOP OVER TICKERS
 # ----------------------------
 for ticker in TICKERS:
-    df = yf.download(ticker, period="6mo", interval="1d", auto_adjust=True)
+    df = yf.download(ticker, period="7d", interval="15m", auto_adjust=True)
     df = signal_filter(df)
     latest = df.iloc[-1]
 
     col1, col2 = st.columns([2, 1])
     with col1:
-        st.subheader(f"{ticker} — Close: {latest['Close']:.2f}")
-        # Enhanced chart with volume and styling
-        # Enhanced chart with colored volume
+        st.subheader(f"{ticker} — Close: {latest['Close']:.2f} (1H)")
+        
+        # Filter last 7 trading days during market hours only
+        end = df.index[-1]
+        start = end - pd.tseries.offsets.BDay(7)
+        df_plot = df.loc[df.index >= start].between_time("09:30", "16:00")
+
+
         fig = go.Figure()
 
-        # Candlestick with colors
+        # Candlestick
         fig.add_trace(go.Candlestick(
-            x=df.index,
-            open=df['Open'], high=df['High'],
-            low=df['Low'], close=df['Close'],
+            x=df_plot.index,
+            open=df_plot['Open'], high=df_plot['High'],
+            low=df_plot['Low'], close=df_plot['Close'],
             name="Price",
             increasing_line_color="green",
             decreasing_line_color="red",
             showlegend=True
         ))
 
-        # SMA10 line
+        # SMA50
         fig.add_trace(go.Scatter(
-            x=df.index, y=df["SMA10"],
-            mode="lines", name="SMA10",
+            x=df_plot.index, y=df_plot["SMA50"],
+            mode="lines", name="SMA50",
             line=dict(color="blue", width=2, dash="dot")
         ))
 
-        # Color volume bars based on up/down
-        colors = np.where(df['Close'] >= df['Open'], "rgba(0,200,0,0.5)", "rgba(200,0,0,0.5)")
-
+        # Volume bars
+        colors = np.where(df_plot['Close'] >= df_plot['Open'], "rgba(0,200,0,0.5)", "rgba(200,0,0,0.5)")
         fig.add_trace(go.Bar(
-            x=df.index, y=df["Volume"],
+            x=df_plot.index, y=df_plot["Volume"],
             name="Volume",
             marker=dict(color=colors),
             yaxis="y2",
             opacity=0.6
         ))
 
-        # Layout
+        # Layout: remove gaps (weekends, non-market hours)
         fig.update_layout(
             template="plotly_white",
             height=500,
-            xaxis=dict(rangeslider=dict(visible=False)),
+            xaxis=dict(
+                rangeslider=dict(visible=False),
+                rangebreaks=[
+                    dict(bounds=["sat", "mon"]),       # hide weekends
+                    dict(bounds=[16, 9.5], pattern="hour")  # hide after-hours
+                ]
+            ),
             yaxis=dict(title="Price"),
             yaxis2=dict(
                 title="Volume",
@@ -328,7 +309,7 @@ for ticker in TICKERS:
 
     with col2:
         if latest["Signal"]:
-            st.success(f"🚨 Trade Signal Triggered at {latest['Close']:.2f}")
+            st.success(f"🚨 Trade Signal Triggered at {latest['Close']:.2f} (1H)")
             confidence = compute_confidence(latest)
             st.metric("Quant Confidence Score", f"{confidence}/100")
 
@@ -401,4 +382,4 @@ for ticker in TICKERS:
             except Exception as e:
                 st.error(f"⚠️ Option chain fetch failed for {ticker}: {e}")
         else:
-            st.info("No signal today.")
+            st.info("No signal at this hour.")
