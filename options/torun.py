@@ -4,7 +4,7 @@ import pandas as pd
 # -----------------------------
 # Parameters (best from NVDA grid search)
 # -----------------------------
-TICKERS = ["NVDA", "TSLA", "AMD", "AAPL", "META"]
+TICKERS = ["NVDA", "TSLA", "AMD", "META", "GOOGL", "AMZN", "PLTR", "AAPL", "MSFT", "INTC", "QCOM", "IBM", "ORCL", "NBIS"]
 LOOKBACK_DAYS = 30
 INTERVAL = "30m"       # best interval
 RVOL_LOOKBACK = 20
