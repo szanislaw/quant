@@ -15,32 +15,32 @@ import os
 # ----------------------------
 st.set_page_config(page_title="Options Signal Dashboard", layout="wide")
 
-# ----------------------------
-# SIMPLE PASSWORD PROTECTION
-# ----------------------------
-PASSWORD = os.getenv("STREAMLIT_PASSWORD", "celshawn00")  # set via env var in production
+# # ----------------------------
+# # SIMPLE PASSWORD PROTECTION
+# # ----------------------------
+# PASSWORD = os.getenv("STREAMLIT_PASSWORD", "celshawn00")  # set via env var in production
 
-def check_password():
-    """Password check before running the app."""
-    def password_entered():
-        if st.session_state["password"] == PASSWORD:
-            st.session_state["password_correct"] = True
-            del st.session_state["password"]  # clean up
-        else:
-            st.session_state["password_correct"] = False
+# def check_password():
+#     """Password check before running the app."""
+#     def password_entered():
+#         if st.session_state["password"] == PASSWORD:
+#             st.session_state["password_correct"] = True
+#             del st.session_state["password"]  # clean up
+#         else:
+#             st.session_state["password_correct"] = False
 
-    if "password_correct" not in st.session_state:
-        st.text_input("🔒 Enter password", type="password", on_change=password_entered, key="password")
-        return False
-    elif not st.session_state["password_correct"]:
-        st.text_input("🔒 Enter password", type="password", on_change=password_entered, key="password")
-        st.error("❌ Wrong password")
-        return False
-    else:
-        return True
+#     if "password_correct" not in st.session_state:
+#         st.text_input("🔒 Enter password", type="password", on_change=password_entered, key="password")
+#         return False
+#     elif not st.session_state["password_correct"]:
+#         st.text_input("🔒 Enter password", type="password", on_change=password_entered, key="password")
+#         st.error("❌ Wrong password")
+#         return False
+#     else:
+#         return True
 
-if not check_password():
-    st.stop()
+# if not check_password():
+#     st.stop()
 
 # ----------------------------
 # Optional: install if missing

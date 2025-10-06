@@ -13,51 +13,70 @@ RVOL_THRESHOLD = 2.5
 ATR_LOOKBACK = 14
 
 # -----------------------------
-# Dummy option contract
+# Get real option contract
 # -----------------------------
 def get_option_contract(ticker, spot_price):
-    expiry = pd.Timestamp.today() + timedelta(days=14)  # 2 weeks
-    strike = round(spot_price)  # ATM
-    return f"{ticker} {expiry.strftime('%Y-%m-%d')} {strike}C"
+    try:
+        opt = yf.Ticker(ticker)
+        expiries = opt.options
+        if not expiries:
+            return None
+
+        today = pd.Timestamp.today().normalize()
+
+        # Pick the nearest expiry at least 7 days away (avoid same-week expiry)
+        valid_expiries = [pd.Timestamp(e) for e in expiries if pd.Timestamp(e) > today + pd.Timedelta(days=7)]
+        expiry = min(valid_expiries) if valid_expiries else pd.Timestamp(expiries[0])
+
+        chain = opt.option_chain(expiry.strftime("%Y-%m-%d"))
+        calls = chain.calls
+        if calls.empty:
+            return None
+
+        # Find nearest strike to spot price
+        strike = calls.iloc[(calls['strike'] - spot_price).abs().argmin()]['strike']
+        return f"{ticker} {expiry.strftime('%Y-%m-%d')} {int(strike)}C"
+    except Exception as e:
+        print(f"⚠️ Could not fetch option chain for {ticker}: {e}")
+        return None
 
 # -----------------------------
 # Exit strategy calculator
 # -----------------------------
 def compute_exit_strategy(df, entry_idx, entry_price):
-    # ATR-based target
     df["H-L"] = df["High"] - df["Low"]
     df["H-PC"] = (df["High"] - df["Close"].shift()).abs()
     df["L-PC"] = (df["Low"] - df["Close"].shift()).abs()
     df["TR"] = df[["H-L", "H-PC", "L-PC"]].max(axis=1)
     atr = df["TR"].rolling(ATR_LOOKBACK).mean().iloc[entry_idx]
 
-    target_price = entry_price * (1 + atr / entry_price * 1.5)  # ATR × 1.5
-    stop_price = entry_price * (1 - 0.003)  # initial stop ~0.3%
-
-    # Trailing stop ratio = 50% of unrealized gain
-    tsl_ratio = 0.5  
+    target_price = entry_price * (1 + atr / entry_price * 1.5)
+    stop_price = entry_price * (1 - 0.003)
+    tsl_ratio = 0.5  # 50% of unrealized gain
 
     return round(target_price, 2), round(stop_price, 2), tsl_ratio
 
 # -----------------------------
-# Signal detection
+# Find most recent signal
 # -----------------------------
-def find_signals(df, ticker):
-    signals = []
-    for i in range(1, len(df)):
-        ts = df.index[i]
-        close = df["Close"].iloc[i]
-        high_prev = df["High"].iloc[i - 1]
-        rvol = df["RVOL"].iloc[i]
+def find_latest_signal(df, ticker):
+    if len(df) < 2:
+        return None
 
-        if ts.hour < 9 or (ts.hour == 9 and ts.minute < 30) or ts.hour > 12:
-            continue
+    ts = df.index[-1]
+    close = df["Close"].iloc[-1]
+    high_prev = df["High"].iloc[-2]
+    rvol = df["RVOL"].iloc[-1]
 
-        if close > high_prev and rvol > RVOL_THRESHOLD:
-            option = get_option_contract(ticker, close)
-            tp, sl, tsl = compute_exit_strategy(df, i, close)
+    # Only check signals during morning session
+    if ts.hour < 9 or (ts.hour == 9 and ts.minute < 30) or ts.hour > 12:
+        return None
 
-            signals.append({
+    if close > high_prev and rvol > RVOL_THRESHOLD:
+        option = get_option_contract(ticker, close)
+        if option:
+            tp, sl, tsl = compute_exit_strategy(df, len(df) - 1, close)
+            return {
                 "Ticker": ticker,
                 "SignalTime": ts,
                 "SpotPrice": round(close, 2),
@@ -66,8 +85,8 @@ def find_signals(df, ticker):
                 "TakeProfit": tp,
                 "StopLoss": sl,
                 "TrailingStopRatio": tsl
-            })
-    return signals
+            }
+    return None
 
 # -----------------------------
 # Run across tickers
@@ -86,12 +105,12 @@ for ticker in TICKERS:
     else:
         df.index = df.index.tz_convert("US/Eastern")
 
-    # Indicators
     df["Vol20"] = df["Volume"].rolling(RVOL_LOOKBACK).mean()
     df["RVOL"] = df["Volume"] / df["Vol20"]
 
-    signals = find_signals(df, ticker)
-    all_signals.extend(signals)
+    sig = find_latest_signal(df, ticker)
+    if sig:
+        all_signals.append(sig)
 
 # -----------------------------
 # Pick Top 5
@@ -99,8 +118,8 @@ for ticker in TICKERS:
 signals_df = pd.DataFrame(all_signals)
 
 if signals_df.empty:
-    print("\n⚠️ No option signals found today.")
+    print("\n⚠️ No option signals found on latest bar.")
 else:
-    top5 = signals_df.sort_values(by="RVOL", ascending=False).head(10)
-    print("\n=== Top 5 Option Recommendations for Today ===")
+    top5 = signals_df.sort_values(by="RVOL", ascending=False).head(5)
+    print("\n=== Top 5 Option Recommendations (Latest Signals) ===")
     print(top5.to_string(index=False))
