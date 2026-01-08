@@ -36,16 +36,11 @@ TICKERS = ["NVDA", "AMD", "GOOGL", "META", "NBIS", "CRWV", "AMZN", "PLTR",
 def load_fino1():
     model_name = "TheFinAI/Fin-o1-8B"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    quant_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.float16
-    )
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        device_map="auto",
-        torch_dtype=torch.float16,
-        quantization_config=quant_config
+        torch_dtype=torch.float32,
+        device_map={"": "cpu"},
+        low_cpu_mem_usage=True
     )
     return model, tokenizer
 
